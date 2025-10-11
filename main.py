@@ -5,6 +5,15 @@ import os
 from datetime import datetime, timedelta, timezone
 import random
 import opencc #简繁转换
+import urllib.request
+from assets.screen_detection import ScreenDetection
+
+# 进度指示函数
+def show_progress(current, total, task_name):
+    percentage = (current / total) * 100 if total > 0 else 0
+    print(f"\r{task_name} 进度: {current}/{total} ({percentage:.1f}%)", end="", flush=True)
+    if current == total:
+        print()  # 完成后换行
 
 # 执行开始时间
 timestart = datetime.now()
@@ -278,11 +287,27 @@ def correct_name_data(name):
         name = corrections_name[name]
     return name
     
-# 检查频道是否包含画面静止相关关键词
-def is_blocked_screen(channel_name):
+# 初始化画面检测器
+screen_detector = ScreenDetection()
+
+# 检查频道是否包含画面静止相关关键词或实际画面是否静止
+def is_blocked_screen(channel_name, channel_address=None):
+    # 首先检查频道名称中的关键词
     for pattern in blocked_patterns:
         if pattern in channel_name:
             return True
+    
+    # 如果提供了频道地址，使用ScreenDetection检测实际画面是否静止
+    if channel_address and (channel_address.startswith('http') or channel_address.startswith('rtmp')):
+        try:
+            # 只对HTTP和RTMP协议的流进行画面检测
+            frozen, message = screen_detector.detect_frozen_screen(channel_address)
+            if frozen:
+                print(f"检测到静止画面: {channel_name}, {channel_address} - {message}")
+                return True
+        except Exception as e:
+            print(f"画面检测出错: {e}")
+    
     return False
 
 # 分发直播源，归类，把这部分从process_url剥离出来，为以后加入whitelist源清单做准备。
@@ -296,8 +321,8 @@ def process_channel_line(line):
         channel_address = clean_url(line.split(',')[1]).strip()  #把URL中$之后的内容都去掉
         line=channel_name+","+channel_address #重新组织line
         
-        # 检查是否是黑名单或包含画面静止关键词
-        if len(channel_address) > 0 and channel_address not in combined_blacklist and not is_blocked_screen(channel_name):
+        # 检查是否是黑名单或包含画面静止关键词，以及实际画面是否静止
+        if len(channel_address) > 0 and channel_address not in combined_blacklist and not is_blocked_screen(channel_name, channel_address):
             # 根据行内容判断存入哪个对象，开始分发
             if channel_name in ys_dictionary: #央视频道
                 if check_url_existence(ys_lines, channel_address):
@@ -488,14 +513,16 @@ def process_url(url):
                         text = data.decode('iso-8859-1')
                     except UnicodeDecodeError:
                         print("无法确定合适的编码格式进行解码。")
-                        
+                         
             #处理m3u提取channel_name和channel_address
             if is_m3u_content(text):
                 text=convert_m3u_to_txt(text)
 
             # 逐行处理内容
             lines = text.split('\n')
-            print(f"行数: {len(lines)}")
+            total_lines = len(lines)
+            processed_lines = 0
+            print(f"行数: {total_lines}")
             for line in lines:
                 if  "#genre#" not in line and "," in line and "://" in line:
                     # 拆分成频道名和URL部分
@@ -509,8 +536,11 @@ def process_url(url):
                         for channel_url in url_list:
                             newline=f'{channel_name},{channel_url}'
                             process_channel_line(newline)
+                processed_lines += 1
+                show_progress(processed_lines, total_lines, f"处理URL: {url}")
 
             other_lines.append('\n') #每个url处理完成后，在other_lines加个回车 2024-08-02 10:46
+            print(f"URL处理完成: {url}")
 
     except Exception as e:
         print(f"处理URL时发生错误：{e}")
@@ -531,12 +561,18 @@ def sort_data(order, data):
 #白名单加入
 other_lines.append("白名单,#genre#")
 print(f"添加白名单 whitelist.txt")
+whitelist_total = len(whitelist_lines)
+whitelist_processed = 0
 for line in whitelist_lines:
     process_channel_line(line)
+    whitelist_processed += 1
+    show_progress(whitelist_processed, whitelist_total, "处理白名单")
 
 #读取whitelist,把高响应源从白名单中抽出加入。
 other_lines.append("白名单测速,#genre#")
 print(f"添加白名单 whitelist_auto.txt")
+whitelist_auto_total = len(whitelist_auto_lines)
+whitelist_auto_processed = 0
 for line in whitelist_auto_lines:
     if  "#genre#" not in line and "," in line and "://" in line:
         parts = line.split(",")
@@ -547,11 +583,20 @@ for line in whitelist_auto_lines:
             response_time = 60000  # 单位毫秒，转换失败给个60秒
         if response_time < 2000: #2s以内的高响应源
             process_channel_line(",".join(parts[1:]))
+    whitelist_auto_processed += 1
+    show_progress(whitelist_auto_processed, whitelist_auto_total, "处理自动白名单")
 
 #加入配置的url
+urls_total = len(urls)
+urls_processed = 0
+print(f"开始处理配置的URL列表，共{urls_total}个URL")
 for url in urls:
-    if url.startswith("http"):        
+    if url.startswith("http"):
+        print(f"\n[{urls_processed+1}/{urls_total}] 开始处理: {url}")
         process_url(url)
+        urls_processed += 1
+        show_progress(urls_processed, urls_total, "配置URL处理总进度")
+print(f"所有配置的URL处理完成")
 
 # 获取当前的 UTC 时间
 utc_time = datetime.now(timezone.utc)
@@ -627,21 +672,36 @@ others_file = "others.txt"
 
 try:
     # 瘦身版
+    print(f"开始保存精简版文件: {output_file_simple}")
+    simple_total = len(all_lines_simple)
+    simple_processed = 0
     with open(output_file_simple, 'w', encoding='utf-8') as f:
         for line in all_lines_simple:
             f.write(line + '\n')
+            simple_processed += 1
+            show_progress(simple_processed, simple_total, f"保存精简版文件")
     print(f"合并后的精简文本已保存到文件: {output_file_simple}")
 
     # 全集版
+    print(f"开始保存全集版文件: {output_file}")
+    full_total = len(all_lines)
+    full_processed = 0
     with open(output_file, 'w', encoding='utf-8') as f:
         for line in all_lines:
             f.write(line + '\n')
+            full_processed += 1
+            show_progress(full_processed, full_total, f"保存全集版文件")
     print(f"合并后的文本已保存到文件: {output_file}")
 
     # 其他
+    print(f"开始保存其他文件: {others_file}")
+    others_total = len(other_lines)
+    others_processed = 0
     with open(others_file, 'w', encoding='utf-8') as f:
         for line in other_lines:
             f.write(line + '\n')
+            others_processed += 1
+            show_progress(others_processed, others_total, f"保存其他文件")
     print(f"其他已保存到文件: {others_file}")
 
 except Exception as e:
