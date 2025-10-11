@@ -35,6 +35,24 @@ blacklist_auto=read_blacklist_from_txt('assets/whitelist-blacklist/blacklist_aut
 blacklist_manual=read_blacklist_from_txt('assets/whitelist-blacklist/blacklist_manual.txt') 
 combined_blacklist = set(blacklist_auto + blacklist_manual)  #list是个列表，set是个集合，据说检索速度集合要快很多。2024-08-08
 
+#读取画面静止关键词列表
+def read_blocked_screen_patterns(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+            # 过滤掉注释行和空行
+            patterns = [line.strip() for line in lines if line.strip() and not line.strip().startswith('#')]
+            return patterns
+    except FileNotFoundError:
+        print(f"File '{file_path}' not found.")
+        return []
+    except Exception as e:
+        print(f"An error occurred reading blocked screen patterns: {e}")
+        return []
+
+# 加载画面静止关键词列表
+blocked_patterns = read_blocked_screen_patterns('assets/blocked_screen_patterns.txt')
+
 # 定义多个对象用于存储不同内容的行文本
 # 主频道
 ys_lines = [] #央视频道
@@ -260,6 +278,13 @@ def correct_name_data(name):
         name = corrections_name[name]
     return name
     
+# 检查频道是否包含画面静止相关关键词
+def is_blocked_screen(channel_name):
+    for pattern in blocked_patterns:
+        if pattern in channel_name:
+            return True
+    return False
+
 # 分发直播源，归类，把这部分从process_url剥离出来，为以后加入whitelist源清单做准备。
 def process_channel_line(line):
     if  "#genre#" not in line and "#EXTINF:" not in line and "," in line and "://" in line:
@@ -271,7 +296,8 @@ def process_channel_line(line):
         channel_address = clean_url(line.split(',')[1]).strip()  #把URL中$之后的内容都去掉
         line=channel_name+","+channel_address #重新组织line
         
-        if len(channel_address) > 0 and channel_address not in combined_blacklist: # 判断当前源是否在blacklist中
+        # 检查是否是黑名单或包含画面静止关键词
+        if len(channel_address) > 0 and channel_address not in combined_blacklist and not is_blocked_screen(channel_name):
             # 根据行内容判断存入哪个对象，开始分发
             if channel_name in ys_dictionary: #央视频道
                 if check_url_existence(ys_lines, channel_address):
